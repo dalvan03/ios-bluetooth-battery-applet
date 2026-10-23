@@ -40,13 +40,12 @@
     },
     "panel-display-mode": {
         "type": "combobox",
-        "default": "lowest",
-        "description": "Texto ao lado do ícone no painel",
+        "default": "rings_bt",
+        "description": "Estilo do indicador na barra (Panel)",
         "options": {
-            "Menor bateria conectada (ex: 45%)": "lowest",
-            "Todos os conectados (ex: 🎧 90% • 🖱️ 65%)": "all",
-            "Quantidade de ativos (ex: 2 BT)": "count",
-            "Somente ícone": "icon"
+            "Mini-Anéis iOS com símbolo Bluetooth no centro (Padrão)": "rings_bt",
+            "Mini-Anéis iOS + Porcentagem ao lado": "rings_pct",
+            "Mini-Anéis iOS com ícone do dispositivo no centro": "rings_device"
         }
     },
     "hide-when-empty": {

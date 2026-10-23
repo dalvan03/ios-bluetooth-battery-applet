@@ -18,18 +18,19 @@ try {
     UPowerGlib = null;
 }
 
-class IOSBluetoothBatteryApplet extends Applet.TextIconApplet {
+class IOSBluetoothBatteryApplet extends Applet.Applet {
     constructor(metadata, orientation, panel_height, instance_id) {
         super(orientation, panel_height, instance_id);
 
         this.metadata = metadata;
         this.orientation = orientation;
+        this.panel_height = panel_height || 28;
         this.instance_id = instance_id;
 
         this.setAllowedLayout(Applet.AllowedLayout.BOTH);
 
         // Default settings fallback
-        this.panelDisplayMode = "lowest";
+        this.panelDisplayMode = "rings_bt";
         this.hideWhenEmpty = false;
         this.updateInterval = 5;
         this.showDisconnectedPaired = true;
@@ -65,11 +66,21 @@ class IOSBluetoothBatteryApplet extends Applet.TextIconApplet {
         this._hasWpctl = GLib.find_program_in_path("wpctl") !== null;
         this._hasPactl = GLib.find_program_in_path("pactl") !== null;
 
+        // Custom Cairo Canvas for Panel Bar (Option 5: Multi-Rings with small Bluetooth symbol in center)
+        this._panelCanvas = new St.DrawingArea({ reactive: false });
+        this._panelCanvas.connect("repaint", (area) => this._onRepaintPanel(area));
+        this.actor.add_actor(this._panelCanvas);
+
         this._initSettings();
         this._initMenu();
         this._subscribeDbusSignals();
         this._refreshAll();
         this._startLoop();
+    }
+
+    on_panel_height_changed() {
+        this.panel_height = this._panelHeight || 28;
+        this._updatePanelIndicator();
     }
 
     _initSettings() {
@@ -601,46 +612,107 @@ class IOSBluetoothBatteryApplet extends Applet.TextIconApplet {
                 return;
             }
             this.actor.show();
-            this.set_applet_icon_symbolic_name("bluetooth-disabled-symbolic");
-            this.set_applet_label("");
             this.set_applet_tooltip("Nenhum dispositivo Bluetooth conectado");
+        } else {
+            this.actor.show();
+            let tooltipLines = connected.map(d => {
+                let batTxt = d.hasBatteryLevel ? (d.percentage + "%") : "Conectado";
+                return "• " + d.name + ": " + batTxt;
+            });
+            this.set_applet_tooltip("Baterias Bluetooth Conectadas:\n" + tooltipLines.join("\n"));
+        }
+
+        let h = Math.max(22, this._panelHeight || this.panel_height || 28);
+        let ringCount = Math.max(1, Math.min(3, connected.length));
+        let ringDiam = Math.min(22, Math.max(16, h - 6));
+        let gap = 5;
+        let padX = 4;
+        let showPctText = (this.panelDisplayMode === "rings_pct" && connected.length > 0);
+        let textExtraW = showPctText ? 34 : 0;
+
+        let w = padX * 2 + ringCount * ringDiam + (ringCount - 1) * gap + textExtraW;
+        if (this._panelCanvas) {
+            this._panelCanvas.set_size(w, h);
+            this._panelCanvas.queue_repaint();
+        }
+    }
+
+    _onRepaintPanel(area) {
+        let cr = area.get_context();
+        let [w, h] = area.get_surface_size();
+
+        cr.save();
+        cr.setOperator(Cairo.Operator.CLEAR);
+        cr.paint();
+        cr.restore();
+
+        cr.setAntialias(Cairo.Antialias.BEST);
+
+        let connected = this._mergedDevices.filter(d => d.connected).slice(0, 3);
+        let ringDiam = Math.min(22, Math.max(16, h - 6));
+        let radius = (ringDiam - 3.2) / 2;
+        let strokeW = 2.6;
+        let gap = 5;
+        let padX = 4;
+        let cy = h / 2;
+
+        if (connected.length === 0) {
+            // Subtle offline ring with muted Bluetooth rune in center
+            let cx = w / 2;
+            cr.newPath();
+            cr.arc(cx, cy, radius, 0, 2 * Math.PI);
+            cr.setSourceRGBA(1.0, 1.0, 1.0, 0.22);
+            cr.setLineWidth(strokeW);
+            cr.stroke();
+
+            this._drawVectorIcon(cr, "bluetooth", cx, cy, radius * 1.15, [1.0, 1.0, 1.0, 0.50]);
+            cr.$dispose();
             return;
         }
 
-        this.actor.show();
+        for (let i = 0; i < connected.length; i++) {
+            let dev = connected[i];
+            let cx = padX + ringDiam / 2 + i * (ringDiam + gap);
 
-        // Choose symbolic icon matching the primary/lowest connected device
-        let primary = connected[0];
-        let symIcon = this._getSymbolicIconName(primary.type);
-        this.set_applet_icon_symbolic_name(symIcon);
+            // Track circle
+            cr.newPath();
+            cr.arc(cx, cy, radius, 0, 2 * Math.PI);
+            cr.setSourceRGBA(1.0, 1.0, 1.0, 0.18);
+            cr.setLineWidth(strokeW);
+            cr.stroke();
 
-        // Panel text mode
-        if (this.panelDisplayMode === "icon") {
-            this.set_applet_label("");
-        } else if (this.panelDisplayMode === "count") {
-            this.set_applet_label(connected.length + " BT");
-        } else if (this.panelDisplayMode === "all") {
-            let parts = connected.slice(0, 3).map(d => {
-                return d.hasBatteryLevel ? (d.percentage + "%") : d.shortName;
-            });
-            this.set_applet_label(parts.join(" • "));
-        } else {
-            // "lowest"
-            let withBat = connected.filter(d => d.hasBatteryLevel);
-            if (withBat.length > 0) {
-                let lowest = withBat.reduce((min, cur) => cur.percentage < min.percentage ? cur : min, withBat[0]);
-                this.set_applet_label(lowest.percentage + "%");
-            } else {
-                this.set_applet_label(connected.length + "");
+            // Active battery arc
+            let pct = dev.hasBatteryLevel ? dev.percentage : 100;
+            let progress = Math.max(0.05, Math.min(1.0, pct / 100.0));
+            let color = this._getBatteryRingColor(dev);
+
+            cr.newPath();
+            cr.setLineCap(Cairo.LineCap.ROUND);
+            cr.arc(cx, cy, radius, -Math.PI / 2, -Math.PI / 2 + progress * 2 * Math.PI);
+            cr.setSourceRGBA(color[0], color[1], color[2], 0.98);
+            cr.setLineWidth(strokeW);
+            cr.stroke();
+
+            // Small Bluetooth icon in the center (or device icon if selected in settings)
+            let centerIcon = (this.panelDisplayMode === "rings_device") ? dev.type : "bluetooth";
+            this._drawVectorIcon(cr, centerIcon, cx, cy, radius * 1.15, [1.0, 1.0, 1.0, 0.95]);
+        }
+
+        if (this.panelDisplayMode === "rings_pct") {
+            let primary = connected[0];
+            let txt = primary.hasBatteryLevel ? (primary.percentage + "%") : "";
+            if (txt) {
+                let textX = padX + connected.length * ringDiam + (connected.length - 1) * gap + 5;
+                this._drawText(cr, txt, textX, cy - 6, {
+                    size: 8.8,
+                    weight: Pango.Weight.BOLD,
+                    color: [0.98, 0.98, 1.0, 0.95],
+                    align: "left"
+                });
             }
         }
 
-        // Rich tooltip summary
-        let tooltipLines = connected.map(d => {
-            let batTxt = d.hasBatteryLevel ? (d.percentage + "%") : "Conectado";
-            return "• " + d.name + ": " + batTxt;
-        });
-        this.set_applet_tooltip("Baterias Bluetooth Conectadas:\n" + tooltipLines.join("\n"));
+        cr.$dispose();
     }
 
     _rebuildPopoverUI() {
@@ -975,7 +1047,7 @@ class IOSBluetoothBatteryApplet extends Applet.TextIconApplet {
     _getSymbolicIconName(type) {
         switch (type) {
             case "headphone":
-                return "audio-headset-symbolic";
+                return "audio-headphones-symbolic";
             case "speaker":
                 return "audio-speakers-symbolic";
             case "mouse":
